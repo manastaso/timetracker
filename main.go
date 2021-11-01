@@ -41,6 +41,7 @@ func startWork(task string, idle bool) {
 	fmt.Println("******** WORK LOG START************")
 	if idle {
 		fmt.Printf("Idle work log %f minutes (%f seconds) on %s\n", time.Now().Sub(pointInTimeWhenIWentIdle).Minutes(), time.Now().Sub(pointInTimeWhenIWentIdle).Seconds(), task)
+		fmt.Println("******** WORK LOG END************")
 		return
 	}
 	if len(lastTask) != 0 {

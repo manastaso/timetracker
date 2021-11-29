@@ -29,6 +29,7 @@ var (
 	currentTaskStartInstant     time.Time
 	idlenessInstant             time.Time
 	currentTask                 binding.String = binding.NewString()
+	currentStatus               binding.String = binding.NewString()
 	currentTaskStartTimeDisplay binding.String = binding.NewString()
 	currentTaskDurationDisplay  binding.String = binding.NewString()
 	idlenessDurationDisplay     binding.String = binding.NewString()
@@ -39,7 +40,7 @@ var (
 	b3                          *widget.Button
 	b4                          *widget.Button
 	emptyTask                   error = errors.New("emptyTask")
-	w                           *bufio.Writer
+	workLogWriter               *bufio.Writer
 	working                     bool
 	myLogger                    *log.Logger
 
@@ -80,12 +81,12 @@ func (m myTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
 }
 
 func init() {
-	file, err := os.OpenFile("tracker.log",
+	logFile, err := os.OpenFile("tracker.log",
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		log.Fatalln("Failed to open error log file:", err)
 	}
-	myLogger = log.New(io.MultiWriter(file), "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+	myLogger = log.New(io.MultiWriter(logFile), "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 }
 
 func startWork(task string, currentTask binding.String) {
@@ -95,6 +96,7 @@ func startWork(task string, currentTask binding.String) {
 	myLogger.Printf("Starting to work on: %s \n", task)
 	currentTask.Set(task)
 	currentTaskStartTimeDisplay.Set(time.Now().Format("15:04:05"))
+	currentStatus.Set("Working...")
 }
 
 func stopWork(currentTask binding.String) {
@@ -102,28 +104,30 @@ func stopWork(currentTask binding.String) {
 	currentTaskBoundString, currentTaskBindingError := currentTask.Get()
 	if currentTaskBoundString != "" && currentTaskBindingError == nil {
 		myLogger.Printf("Spent %f minutes (%f seconds) on %s\n", time.Now().Sub(currentTaskStartInstant).Minutes(), time.Now().Sub(currentTaskStartInstant).Seconds(), currentTaskBoundString)
-		writtenBytes, err := fmt.Fprintf(w, "%s;%s;%s;%s;%s;%g\r", currentTaskBoundString, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Now().Sub(currentTaskStartInstant).Minutes()))
+		writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", currentTaskBoundString, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Now().Sub(currentTaskStartInstant).Minutes()))
 		if err != nil {
 			panic(err)
 		}
 		myLogger.Printf("wrote %d bytes\n", writtenBytes)
-		w.Flush()
+		workLogWriter.Flush()
 		currentTask.Set("")
 		currentTaskStartTimeDisplay.Set("")
 		currentTaskDurationDisplay.Set("")
+		currentStatus.Set("Not Working...")
 	}
 
 }
 
 func stopDueToIdleness(currentTask string, pointInTimeWhenIWentIdle time.Time) {
+	currentStatus.Set(fmt.Sprintf("Idle since %s", time.Now().Format("15:04:05")))
 	myLogger.Printf("Idling for %f minutes (%f seconds) while on %s\n", time.Now().Sub(pointInTimeWhenIWentIdle).Minutes(), time.Now().Sub(pointInTimeWhenIWentIdle).Seconds(), currentTask)
 	myLogger.Printf("Logging %f minutes (%f seconds)  on %s\n", pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes(), pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Seconds(), currentTask)
-	writtenBytes, err := fmt.Fprintf(w, "%s;%s;%s;%s;%s;%g\r", currentTask, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), math.Round(pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes()))
+	writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", currentTask, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), math.Round(pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes()))
 	if err != nil {
 		panic(err)
 	}
 	myLogger.Printf("wrote %d bytes\n", writtenBytes)
-	w.Flush()
+	workLogWriter.Flush()
 }
 
 func backupLogWork(currentTaskBoundString string) {
@@ -132,12 +136,12 @@ func backupLogWork(currentTaskBoundString string) {
 
 func logIdleWork(idleTask string, pointInTimeWhenIWentIdle time.Time) {
 	myLogger.Printf("Logging idle work %f minutes (%f seconds) on %s\n", time.Now().Sub(pointInTimeWhenIWentIdle).Minutes(), time.Now().Sub(pointInTimeWhenIWentIdle).Seconds(), idleTask)
-	writtenBytes, err := fmt.Fprintf(w, "%s;%s;%s;%s;%s;%g\r", idleTask, pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Now().Sub(pointInTimeWhenIWentIdle).Minutes()))
+	writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", idleTask, pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Now().Sub(pointInTimeWhenIWentIdle).Minutes()))
 	if err != nil {
 		panic(err)
 	}
 	myLogger.Printf("wrote %d bytes\n", writtenBytes)
-	w.Flush()
+	workLogWriter.Flush()
 	currentTask.Set("")
 	currentTaskStartTimeDisplay.Set("")
 	currentTaskDurationDisplay.Set("")
@@ -164,17 +168,18 @@ func IdleTime() time.Duration {
 }
 
 func main() {
-	r, _ := fyne.LoadResourceFromPath("icon.jpg")
-
-	f, err := os.OpenFile("work.log", os.O_APPEND|os.O_WRONLY, 0644)
+	workLogFile, err := os.OpenFile("work.log", os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		panic(err)
 	}
-	w = bufio.NewWriter(f)
-	defer f.Close()
+	workLogWriter = bufio.NewWriter(workLogFile)
+
+	defer workLogFile.Close()
 
 	working = false
 	idlenessTicker.Stop()
+
+	r, _ := fyne.LoadResourceFromPath("icon.jpg")
 	myApp := app.New()
 	myWindow := myApp.NewWindow("MyTimeTracker")
 	myApp.Settings().SetTheme(&myTheme{})
@@ -184,10 +189,15 @@ func main() {
 	iconWidget := widget.NewIcon(r)
 	iconWidget.Resize(fyne.Size{100, 50})
 
+	currentStatus.Set("Not Working")
+	currentStatusLabel := widget.NewLabelWithData(currentStatus)
+	currentStatusLabel.TextStyle = fyne.TextStyle{Bold: true}
+
 	currentTaskLabelName := widget.NewLabel("Current Task")
 	currentTaskLabelValue := widget.NewEntryWithData(currentTask)
 	currentTaskLabelValue.Disable()
 	currentTaskLabelValue.TextStyle = fyne.TextStyle{Bold: true}
+	currentStatusLabel.Alignment = fyne.TextAlignCenter
 
 	startLabelName := widget.NewLabel("Start Time")
 	startLabelValue := widget.NewEntryWithData(currentTaskStartTimeDisplay)
@@ -214,8 +224,9 @@ func main() {
 				formItem}, func(validTask bool) {
 				if validTask {
 					startWork(entry.Text, currentTask)
-					b2.Enable()
 					b1.Disable()
+					b2.Enable()
+					b3.Disable()
 					working = true
 					idlenessTicker.Reset(time.Duration(1 * time.Second))
 				}
@@ -227,8 +238,9 @@ func main() {
 		currentTaskBoundString, currentTaskBindingError := currentTask.Get()
 		if currentTaskBoundString != "" && currentTaskBindingError == nil {
 			stopWork(currentTask)
-			b2.Disable()
 			b1.Enable()
+			b2.Disable()
+			b3.Disable()
 			working = false
 			idlenessTicker.Stop()
 			idlenessDurationDisplay.Set("")
@@ -268,7 +280,8 @@ func main() {
 	b2b3 := container.New(layout.NewGridLayout(2), b2, b3)
 	entriesPlusStopPlusIdle := container.New(layout.NewVBoxLayout(), currentTaskLabelValue, startLabelValue, durationLabelValue, idleDurationLabelValue, b2b3)
 
-	iconPlusExit := container.New(layout.NewBorderLayout(nil, b4, nil, nil), iconWidget, b4)
+	statusIcon := container.New(layout.NewBorderLayout(nil, currentStatusLabel, nil, nil), iconWidget, currentStatusLabel)
+	iconPlusExit := container.New(layout.NewBorderLayout(nil, b4, nil, nil), statusIcon, b4)
 	main := container.New(layout.NewGridLayout(3), labelsPlusStart, entriesPlusStopPlusIdle, iconPlusExit)
 	myWindow.SetContent(main)
 

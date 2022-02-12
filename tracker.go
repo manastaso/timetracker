@@ -25,24 +25,23 @@ import (
 )
 
 var (
-	idlenessTicker                    *time.Ticker = time.NewTicker(1 * time.Second)
-	currentTaskStartInstant           time.Time
-	idlenessInstant                   time.Time
-	maybeWorkingDuration              int
-	currentTask                       binding.String = binding.NewString()
-	currentStatus                     binding.String = binding.NewString()
-	currentTaskStartTimeDisplay       binding.String = binding.NewString()
-	currentTaskDurationDisplay        binding.String = binding.NewString()
-	idlenessDurationDisplay           binding.String = binding.NewString()
-	idlenessInstantDisplay            binding.String = binding.NewString()
-	b1                                *widget.Button
-	b2                                *widget.Button
-	b3                                *widget.Button
-	b4                                *widget.Button
-	workLogWriter                     *bufio.Writer
-	working                           bool
-	weHaveBeenIdleAfterProgramStartup bool
-	myLogger                          *log.Logger
+	idlenessTicker              *time.Ticker = time.NewTicker(1 * time.Second)
+	currentTaskStartInstant     time.Time
+	idlenessInstant             time.Time
+	maybeWorkingDuration        int
+	currentTask                 binding.String = binding.NewString()
+	currentStatus               binding.String = binding.NewString()
+	currentTaskStartTimeDisplay binding.String = binding.NewString()
+	currentTaskDurationDisplay  binding.String = binding.NewString()
+	idlenessDurationDisplay     binding.String = binding.NewString()
+	idlenessInstantDisplay      binding.String = binding.NewString()
+	b1                          *widget.Button
+	b2                          *widget.Button
+	b3                          *widget.Button
+	b4                          *widget.Button
+	workLogWriter               *bufio.Writer
+	working                     bool
+	myLogger                    *log.Logger
 
 	user32           = syscall.MustLoadDLL("user32.dll")
 	kernel32         = syscall.MustLoadDLL("kernel32.dll")
@@ -89,6 +88,14 @@ func init() {
 	myLogger = log.New(io.MultiWriter(logFile), "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 }
 
+func startWorkAndResetUI(newTask string) {
+	startWork(newTask, currentTask)
+	b1.Disable()
+	b2.Enable()
+	b3.Disable()
+	idlenessTicker.Reset(time.Duration(1 * time.Second))
+}
+
 func startWork(task string, currentTask binding.String) {
 	working = true
 	task = strings.Trim(task, "\n")
@@ -104,8 +111,8 @@ func stopWork(currentTask binding.String) {
 	working = false
 	currentTaskBoundString, currentTaskBindingError := currentTask.Get()
 	if currentTaskBoundString != "" && currentTaskBindingError == nil {
-		myLogger.Printf("Spent %f minutes (%f seconds) on %s\n", time.Now().Sub(currentTaskStartInstant).Minutes(), time.Now().Sub(currentTaskStartInstant).Seconds(), currentTaskBoundString)
-		writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", currentTaskBoundString, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Now().Sub(currentTaskStartInstant).Minutes()))
+		myLogger.Printf("Spent %f minutes (%f seconds) on %s\n", time.Since(currentTaskStartInstant).Minutes(), time.Since(currentTaskStartInstant).Seconds(), currentTaskBoundString)
+		writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", currentTaskBoundString, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Since(currentTaskStartInstant).Minutes()))
 		if err != nil {
 			panic(err)
 		}
@@ -122,7 +129,7 @@ func stopWork(currentTask binding.String) {
 func stopDueToIdleness(currentTask string, pointInTimeWhenIWentIdle time.Time) {
 	working = false
 	currentStatus.Set(fmt.Sprintf("Idle since %s", time.Now().Format("15:04:05")))
-	myLogger.Printf("Idling for %f minutes (%f seconds) while on %s\n", time.Now().Sub(pointInTimeWhenIWentIdle).Minutes(), time.Now().Sub(pointInTimeWhenIWentIdle).Seconds(), currentTask)
+	myLogger.Printf("Idling for %f minutes (%f seconds) while on %s\n", time.Since(pointInTimeWhenIWentIdle).Minutes(), time.Since(pointInTimeWhenIWentIdle).Seconds(), currentTask)
 	myLogger.Printf("Logging %f minutes (%f seconds)  on %s\n", pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes(), pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Seconds(), currentTask)
 	writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", currentTask, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), math.Round(pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes()))
 	if err != nil {
@@ -136,9 +143,16 @@ func backupLogWork(currentTaskBoundString string) {
 	myLogger.Printf("Working on %s\n", currentTaskBoundString)
 }
 
+func logIdleWorkAndResetUI(idleTask string) {
+	logIdleWork(idleTask, idlenessInstant)
+	b3.Disable()
+	idlenessDurationDisplay.Set("")
+	idlenessInstantDisplay.Set("")
+}
+
 func logIdleWork(idleTask string, pointInTimeWhenIWentIdle time.Time) {
-	myLogger.Printf("Logging idle work %f minutes (%f seconds) on %s\n", time.Now().Sub(pointInTimeWhenIWentIdle).Minutes(), time.Now().Sub(pointInTimeWhenIWentIdle).Seconds(), idleTask)
-	writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", idleTask, pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Now().Sub(pointInTimeWhenIWentIdle).Minutes()))
+	myLogger.Printf("Logging idle work %f minutes (%f seconds) on %s\n", time.Since(pointInTimeWhenIWentIdle).Minutes(), time.Since(pointInTimeWhenIWentIdle).Seconds(), idleTask)
+	writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", idleTask, pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Since(pointInTimeWhenIWentIdle).Minutes()))
 	if err != nil {
 		panic(err)
 	}
@@ -159,7 +173,7 @@ func taskValidator(text string) error {
 
 }
 
-func IdleTime() time.Duration {
+func getIdleDuration() time.Duration {
 	lastInputInfo.cbSize = uint32(unsafe.Sizeof(lastInputInfo))
 	currentTickCount, _, _ := getTickCount.Call()
 	r1, _, err := getLastInputInfo.Call(uintptr(unsafe.Pointer(&lastInputInfo)))
@@ -170,17 +184,17 @@ func IdleTime() time.Duration {
 }
 
 func checkIfStillWorking(currentTaskBoundString string) {
-	notificationText := fmt.Sprintf("Still working on %s ?", currentTaskBoundString)
+	notificationText := fmt.Sprintf("Still working on %s?", currentTaskBoundString)
 	fyne.CurrentApp().SendNotification(&fyne.Notification{
-		Title:   "Go Time Tracker",
-		Content: notificationText,
+		Title:   notificationText,
+		Content: "You should change the current task if not",
 	})
 }
 
 func checkIfWorkingAndNotTracking() {
 	fyne.CurrentApp().SendNotification(&fyne.Notification{
-		Title:   "Go Time Tracker",
-		Content: "Are you working?",
+		Title:   "Are you maybe working?",
+		Content: "You should track your work",
 	})
 }
 
@@ -194,10 +208,9 @@ func main() {
 	defer workLogFile.Close()
 
 	working = false
-	weHaveBeenIdleAfterProgramStartup = false
 
 	r, _ := fyne.LoadResourceFromPath("icon.jpg")
-	myApp := app.New()
+	myApp := app.NewWithID("GoTimeTracker")
 	myWindow := myApp.NewWindow("MyTimeTracker")
 	myApp.Settings().SetTheme(&myTheme{})
 	myWindow.SetIcon(r)
@@ -235,18 +248,23 @@ func main() {
 		entry := widget.NewEntry()
 		entry.Validator = taskValidator
 		formItem := widget.NewFormItem("Enter task name", entry)
-		dialog.ShowForm("Starting a task", "                        Enter                        ",
+
+		startDialog := dialog.NewForm("Starting a task", "                        Enter                        ",
 			"                        Cancel                        ",
 			[]*widget.FormItem{
 				formItem}, func(validTask bool) {
 				if validTask {
-					startWork(entry.Text, currentTask)
-					b1.Disable()
-					b2.Enable()
-					b3.Disable()
-					idlenessTicker.Reset(time.Duration(1 * time.Second))
+					startWorkAndResetUI(entry.Text)
 				}
 			}, myWindow)
+		entry.OnSubmitted = func(entryString string) {
+			entryError := entry.Validate()
+			if entryError == nil {
+				startWorkAndResetUI(entryString)
+				startDialog.Hide()
+			}
+		}
+		startDialog.Show()
 		myWindow.Canvas().Focus(entry)
 	})
 
@@ -264,21 +282,37 @@ func main() {
 	b2.Disable()
 
 	b3 = widget.NewButton("Log Idle", func() {
+		continueOnIdleTask := true
 		entry := widget.NewEntry()
 		entry.Validator = taskValidator
-
 		formItem := widget.NewFormItem("Enter task you did while idle", entry)
-		dialog.ShowForm("Logging Idle Time", "                        Enter                        ",
+		entryCheck := widget.NewCheck("", func(checked bool) {
+			continueOnIdleTask = checked
+		})
+		entryCheck.Checked = true
+		formItemCheck := widget.NewFormItem("Continue working on this task", entryCheck)
+		logIdleDialog := dialog.NewForm("Logging Idle Time", "                        Enter                        ",
 			"                        Cancel                        ",
 			[]*widget.FormItem{
-				formItem}, func(validTask bool) {
+				formItem, formItemCheck}, func(validTask bool) {
 				if validTask {
-					logIdleWork(entry.Text, idlenessInstant)
-					b3.Disable()
-					idlenessDurationDisplay.Set("")
-					idlenessInstantDisplay.Set("")
+					logIdleWorkAndResetUI(entry.Text)
+					if continueOnIdleTask {
+						startWorkAndResetUI(entry.Text)
+					}
 				}
 			}, myWindow)
+		entry.OnSubmitted = func(entryString string) {
+			entryError := entry.Validate()
+			if entryError == nil {
+				logIdleWorkAndResetUI(entryString)
+				if continueOnIdleTask {
+					startWorkAndResetUI(entry.Text)
+				}
+				logIdleDialog.Hide()
+			}
+		}
+		logIdleDialog.Show()
 		myWindow.Canvas().Focus(entry)
 	})
 	b3.Disable()
@@ -308,32 +342,28 @@ func main() {
 				if (t.Second()+1)%60 == 0 {
 					backupLogWork(currentTaskBoundString)
 				}
-				if (t.Second()+1)%3600 == 0 {
+				if working && (t.Second()+1)%3600 == 0 {
 					checkIfStillWorking(currentTaskBoundString)
 				}
 			}
-			d := time.Duration(10 * time.Minute)
-			i := IdleTime()
-			idlenessDurationDisplay.Set(i.String())
+			durationAfterWhichWeAreConsideredIdle := time.Duration(10 * time.Minute)
+			idleDuration := getIdleDuration()
+			idlenessDurationDisplay.Set(idleDuration.String())
 
-			if i.Seconds() > 3 {
-				weHaveBeenIdleAfterProgramStartup = true
-			}
-
-			if i > d { //if we are idle more than ten minutes
+			if idleDuration > durationAfterWhichWeAreConsideredIdle { //we have been idle
 				if working {
 					b1.Enable()
 					b2.Disable()
 					b3.Enable()
-					idlenessInstant = time.Now().Truncate(d)
+					idlenessInstant = time.Now().Truncate(durationAfterWhichWeAreConsideredIdle)
 					idlenessInstantDisplay.Set(idlenessInstant.Format("15:04:05"))
 					stopDueToIdleness(currentTaskBoundString, idlenessInstant)
 				}
 			} else { //we are not idle, are we maybe working and not tracking?
-				if i.Seconds() < 10 && weHaveBeenIdleAfterProgramStartup { // we are active
+				if idleDuration.Seconds() < 10 { // we are active
 					if !working { //we do not have a current task
-						maybeWorkingDuration += 1       //one more second during which we are maybe working
-						if maybeWorkingDuration == 60 { //1 minute where we are probably working - notify
+						maybeWorkingDuration += 1        //one more second during which we are maybe working
+						if maybeWorkingDuration == 300 { //1 minute where we are probably working - notify
 							checkIfWorkingAndNotTracking()
 							maybeWorkingDuration = 0
 						}

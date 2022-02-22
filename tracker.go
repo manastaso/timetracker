@@ -1,13 +1,23 @@
+/* ideas for new features
+1. Log Idle ==> additional option to log idle time but continue with the task you were doing before going idle
+2. Error Message when call to JIRA did not work ==> give possibility to retry the call
+3. List of recent tasks you have been working on
+4. Enable to select task from JIRA
+*/
+
 package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image/color"
 	"io"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"strings"
 	"syscall"
@@ -22,6 +32,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/gen2brain/beeep"
 )
 
 var (
@@ -40,7 +51,7 @@ var (
 	b3                          *widget.Button
 	b4                          *widget.Button
 	workLogWriter               *bufio.Writer
-	working                     bool
+	working                     bool = false
 	myLogger                    *log.Logger
 
 	user32           = syscall.MustLoadDLL("user32.dll")
@@ -54,6 +65,40 @@ var (
 )
 
 type myTheme struct{}
+
+type Worklog struct {
+	Attributes            Attributes  `json:"attributes"`
+	BillableSeconds       string      `json:"billableSeconds"`
+	OriginID              int         `json:"originId"`
+	Worker                string      `json:"worker"`
+	Comment               string      `json:"comment"`
+	Started               string      `json:"started"`
+	TimeSpentSeconds      int         `json:"timeSpentSeconds"`
+	OriginTaskID          string      `json:"originTaskId"`
+	RemainingEstimate     interface{} `json:"remainingEstimate"`
+	EndDate               interface{} `json:"endDate"`
+	IncludeNonWorkingDays bool        `json:"includeNonWorkingDays"`
+}
+type Account struct {
+	Name            string `json:"name"`
+	WorkAttributeID int    `json:"workAttributeId"`
+	Value           string `json:"value"`
+}
+type Task struct {
+	Name            string `json:"name"`
+	WorkAttributeID int    `json:"workAttributeId"`
+	Value           string `json:"value"`
+}
+type WorkFrom struct {
+	Name            string `json:"name"`
+	WorkAttributeID int    `json:"workAttributeId"`
+	Value           string `json:"value"`
+}
+type Attributes struct {
+	Account  Account  `json:"_Account_"`
+	Task     Task     `json:"_Task_"`
+	WorkFrom WorkFrom `json:"_WorkFrom_"`
+}
 
 func (m myTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 
@@ -113,6 +158,7 @@ func stopWork(currentTask binding.String) {
 	if currentTaskBoundString != "" && currentTaskBindingError == nil {
 		myLogger.Printf("Spent %f minutes (%f seconds) on %s\n", time.Since(currentTaskStartInstant).Minutes(), time.Since(currentTaskStartInstant).Seconds(), currentTaskBoundString)
 		writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", currentTaskBoundString, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Since(currentTaskStartInstant).Minutes()))
+		postWorkLog(currentTaskBoundString, time.Since(currentTaskStartInstant))
 		if err != nil {
 			panic(err)
 		}
@@ -132,6 +178,7 @@ func stopDueToIdleness(currentTask string, pointInTimeWhenIWentIdle time.Time) {
 	myLogger.Printf("Idling for %f minutes (%f seconds) while on %s\n", time.Since(pointInTimeWhenIWentIdle).Minutes(), time.Since(pointInTimeWhenIWentIdle).Seconds(), currentTask)
 	myLogger.Printf("Logging %f minutes (%f seconds)  on %s\n", pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes(), pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Seconds(), currentTask)
 	writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", currentTask, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), math.Round(pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes()))
+	postWorkLog(currentTask, pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant))
 	if err != nil {
 		panic(err)
 	}
@@ -153,6 +200,7 @@ func logIdleWorkAndResetUI(idleTask string) {
 func logIdleWork(idleTask string, pointInTimeWhenIWentIdle time.Time) {
 	myLogger.Printf("Logging idle work %f minutes (%f seconds) on %s\n", time.Since(pointInTimeWhenIWentIdle).Minutes(), time.Since(pointInTimeWhenIWentIdle).Seconds(), idleTask)
 	writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%g\r", idleTask, pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), time.Now().Format("2006-01-02"), time.Now().Format("15:04:05"), math.Round(time.Since(pointInTimeWhenIWentIdle).Minutes()))
+	postWorkLog(idleTask, time.Since(pointInTimeWhenIWentIdle))
 	if err != nil {
 		panic(err)
 	}
@@ -183,19 +231,62 @@ func getIdleDuration() time.Duration {
 	return time.Duration((uint32(currentTickCount) - lastInputInfo.dwTime)) * time.Millisecond
 }
 
-func checkIfStillWorking(currentTaskBoundString string) {
+func checkIfStillWorking(currentTaskBoundString string, window fyne.Window) {
 	notificationText := fmt.Sprintf("Still working on %s?", currentTaskBoundString)
-	fyne.CurrentApp().SendNotification(&fyne.Notification{
-		Title:   notificationText,
-		Content: "You should change the current task if not",
-	})
+	beeep.Beep(300, 500)
+	dialog.NewInformation(notificationText, "You should change the current task if not", window).Show()
+	window.RequestFocus()
 }
 
-func checkIfWorkingAndNotTracking() {
-	fyne.CurrentApp().SendNotification(&fyne.Notification{
-		Title:   "Are you maybe working?",
-		Content: "You should track your work",
-	})
+func checkIfWorkingAndNotTracking(window fyne.Window) {
+	beeep.Beep(beeep.DefaultFreq, beeep.DefaultDuration)
+	dialog.NewInformation("Are you maybe working?", "You should track your work", window).Show()
+	window.RequestFocus()
+}
+
+func postWorkLog(comment string, duration time.Duration) {
+	finalComment := fmt.Sprintf("%s\nAutomatically filled by MyTracker written in GoLang", comment)
+	today := time.Now().Format("2006-01-02")
+	durationInSeconds := int(duration.Seconds())
+	buf := new(bytes.Buffer)
+	u := Worklog{
+		Attributes: Attributes{
+			Account{Name: "Activity", WorkAttributeID: 1, Value: "INT101"},
+			Task{Name: "Task", WorkAttributeID: 2, Value: "Administration"},
+			WorkFrom{Name: "Work From", WorkAttributeID: 4, Value: "Home"}},
+		BillableSeconds:       "",
+		OriginID:              -1,
+		Worker:                "JIRAUSER11920",
+		Comment:               finalComment,
+		Started:               today,
+		TimeSpentSeconds:      durationInSeconds,
+		OriginTaskID:          "71238",
+		RemainingEstimate:     nil,
+		EndDate:               nil,
+		IncludeNonWorkingDays: false}
+	json.NewEncoder(buf).Encode(&u)
+
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+
+	req, err := http.NewRequest("POST", "https://jira.example.com/rest/tempo-timesheets/4/worklogs", buf)
+	req.Header.Set("Authorization", "Bearer blablabla")
+	req.Header.Set("Content-Type", "application/json")
+	if err != nil {
+		myLogger.Fatalf("Got error %s", err.Error())
+	}
+
+	myLogger.Printf("Posting worklog %s %s %d", comment, duration.String(), durationInSeconds)
+	timeWhenPostWasSent := time.Now()
+	resp, err := client.Do(req)
+	myLogger.Printf("Got Response Code %s", resp.Status)
+	myLogger.Printf("Posting Worklog took %s", time.Since(timeWhenPostWasSent).String())
+	if err != nil {
+		myLogger.Fatalf("Got error %s", err.Error())
+	}
+
+	defer resp.Body.Close()
 }
 
 func main() {
@@ -206,8 +297,6 @@ func main() {
 	workLogWriter = bufio.NewWriter(workLogFile)
 
 	defer workLogFile.Close()
-
-	working = false
 
 	r, _ := fyne.LoadResourceFromPath("icon.jpg")
 	myApp := app.NewWithID("GoTimeTracker")
@@ -337,13 +426,13 @@ func main() {
 		for range idlenessTicker.C {
 			currentTaskBoundString, currentTaskBindingError := currentTask.Get()
 			if currentTaskBoundString != "" && currentTaskBindingError == nil {
-				t := time.Now()
-				currentTaskDurationDisplay.Set(t.Sub(currentTaskStartInstant).String())
-				if (t.Second()+1)%60 == 0 {
+				now := time.Now()
+				currentTaskDurationDisplay.Set(now.Sub(currentTaskStartInstant).String())
+				if (now.Second()+1)%60 == 0 {
 					backupLogWork(currentTaskBoundString)
 				}
-				if working && (t.Second()+1)%3600 == 0 {
-					checkIfStillWorking(currentTaskBoundString)
+				if working && (int(time.Since(currentTaskStartInstant).Seconds())%3600 == 0) {
+					checkIfStillWorking(currentTaskBoundString, myWindow)
 				}
 			}
 			durationAfterWhichWeAreConsideredIdle := time.Duration(10 * time.Minute)
@@ -360,11 +449,11 @@ func main() {
 					stopDueToIdleness(currentTaskBoundString, idlenessInstant)
 				}
 			} else { //we are not idle, are we maybe working and not tracking?
-				if idleDuration.Seconds() < 10 { // we are active
+				if idleDuration.Seconds() < 60 { // we are active
 					if !working { //we do not have a current task
 						maybeWorkingDuration += 1        //one more second during which we are maybe working
-						if maybeWorkingDuration == 300 { //1 minute where we are probably working - notify
-							checkIfWorkingAndNotTracking()
+						if maybeWorkingDuration == 300 { //duration we are probably working - notify
+							checkIfWorkingAndNotTracking(myWindow)
 							maybeWorkingDuration = 0
 						}
 					}

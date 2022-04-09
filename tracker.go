@@ -69,9 +69,21 @@ var (
 	myWindow                    fyne.Window
 	maybeChangeTaskDialogClosed bool = false
 	maybeWorkingDialogClosed    bool = false
+
+	worklogHistory WorkLogHistoryRoot
 )
 
 type myTheme struct{}
+
+type WorkLogHistoryRoot struct {
+	WorkLogHistory []WorkLogHistoryEntry `json:"WorkLogHistory"`
+}
+
+type WorkLogHistoryEntry struct {
+	Task    string `json:"task"`
+	Account string `json:"account"`
+	Comment string `json:"comment"`
+}
 
 type AccountQueryResponse struct {
 	PageSize     int    `json:"pageSize"`
@@ -495,6 +507,8 @@ func searchJIRAIsssue(q string) []string {
 }
 
 func postWorkLog(task string, account string, comment string, duration time.Duration) {
+	saveWorkLogToHistory(task, account, comment)
+
 	var originTaskID string
 	var accountValue string
 	if account == "" {
@@ -557,12 +571,84 @@ func postWorkLog(task string, account string, comment string, duration time.Dura
 	defer resp.Body.Close()
 }
 
+func getStringFromHistory(worklogHistory WorkLogHistoryRoot) []string {
+	history := worklogHistory.WorkLogHistory
+
+	list := []string{}
+	for _, entry := range history {
+		buff, _ := json.Marshal(entry)
+		list = append(list, fmt.Sprintf("%s", buff))
+	}
+	return list
+}
+
+func removeDuplicatesFromWorkLogHistory(worklogHistory WorkLogHistoryRoot) []WorkLogHistoryEntry {
+	history := worklogHistory.WorkLogHistory
+
+	keys := make(map[WorkLogHistoryEntry]bool)
+	list := []WorkLogHistoryEntry{}
+	for _, entry := range history {
+		if _, value := keys[entry]; !value {
+			keys[entry] = true
+			list = append(list, entry)
+		}
+	}
+	return list
+
+}
+
+func saveWorkLogToHistory(task string, account string, comment string) {
+	workLogHistoryFile, err := os.OpenFile("work.history", os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		myLogger.Fatalf("\nGot error when writing history %s", err.Error())
+	}
+	defer workLogHistoryFile.Close()
+
+	workLogHistoryWriter := bufio.NewWriter(workLogHistoryFile)
+
+	buf := new(bytes.Buffer)
+
+	u := WorkLogHistoryEntry{
+		Task:    task,
+		Account: account,
+		Comment: comment,
+	}
+
+	worklogHistory.WorkLogHistory = append(worklogHistory.WorkLogHistory, u)
+	worklogHistory.WorkLogHistory = removeDuplicatesFromWorkLogHistory(worklogHistory)
+
+	json.NewEncoder(buf).Encode(&worklogHistory)
+
+	writtenBytes, err := fmt.Fprintf(workLogHistoryWriter, "%s", buf)
+	if err != nil {
+		myLogger.Fatalf("\nGot error when writing history %s", err.Error())
+	}
+	myLogger.Printf("wrote %d bytes to history\n", writtenBytes)
+	workLogHistoryWriter.Flush()
+}
+
+func retrieveWorklogHistory() {
+	file, err := os.OpenFile("work.history", os.O_RDONLY, 0644)
+	if err != nil {
+		myLogger.Fatalf("\nGot error when reading history %s", err.Error())
+	}
+	defer file.Close()
+
+	err = json.NewDecoder(file).Decode(&worklogHistory)
+	myLogger.Printf("Retrieved worklog history of size %d", len(worklogHistory.WorkLogHistory))
+	if err != nil {
+		myLogger.Fatalf("\nGot error when reading history %s", err.Error())
+	}
+}
+
 func main() {
 	workLogFile, err := os.OpenFile("work.log", os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		panic(err)
 	}
 	workLogWriter = bufio.NewWriter(workLogFile)
+
+	retrieveWorklogHistory()
 
 	defer workLogFile.Close()
 
@@ -611,7 +697,8 @@ func main() {
 	idleDurationLabelValue.Disable()
 	idleDurationLabelValue.TextStyle = fyne.TextStyle{Bold: true}
 
-	b1 = widget.NewButton("Start", func() {
+	b1 = widget.NewButton("\r\nStart\r\n", func() {
+		var startDialog dialog.Dialog
 		var entryOptions []string = make([]string, 0)
 		var accountOptions []string = make([]string, 0)
 		var accountSelected string
@@ -624,6 +711,14 @@ func main() {
 		projectEntry.Disable()
 
 		commentEntry := widget.NewEntry()
+
+		var workLogHistoryAsStrings = getStringFromHistory(worklogHistory)
+		recentEntry := widget.NewSelect(workLogHistoryAsStrings, func(s string) {
+			var historyEntry WorkLogHistoryEntry
+			json.Unmarshal([]byte(s), &historyEntry)
+			startWorkAndResetUI(historyEntry.Task, historyEntry.Account, historyEntry.Comment)
+			startDialog.Hide()
+		})
 
 		entry := widget.NewSelectEntry(entryOptions)
 		entry.OnChanged = func(changeEntry string) {
@@ -680,15 +775,16 @@ func main() {
 		}
 		entry.Validator = taskValidator
 
+		formListRecent := widget.NewFormItem("Choose recent", recentEntry)
 		formItem := widget.NewFormItem("Enter task name", entry)
 		commentFormItem := widget.NewFormItem("Comment", commentEntry)
 		accountFormItem := widget.NewFormItem("Account", accountEntry)
 		projectFormItem := widget.NewFormItem("Project", projectEntry)
 
-		startDialog := dialog.NewForm("Starting a task", "                        Enter                        ",
+		startDialog = dialog.NewForm("Starting a task", "                        Enter                        ",
 			"                        Cancel                        ",
 			[]*widget.FormItem{
-				formItem, commentFormItem, accountFormItem, projectFormItem}, func(validTask bool) {
+				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem}, func(validTask bool) {
 				if validTask {
 					startWorkAndResetUI(entry.Text, accountSelected, commentEntry.Text)
 				}
@@ -706,7 +802,7 @@ func main() {
 		myWindow.Canvas().Focus(entry)
 	})
 
-	b2 = widget.NewButton("Stop", func() {
+	b2 = widget.NewButton("\r\nStop\r\n", func() {
 		currentTaskBoundString, currentTaskBindingError := currentTask.Get()
 		if currentTaskBoundString != "" && currentTaskBindingError == nil {
 			stopWork(currentTask, currentAccount, currentComment)
@@ -719,7 +815,8 @@ func main() {
 	})
 	b2.Disable()
 
-	b3 = widget.NewButton("Log Idle", func() {
+	b3 = widget.NewButton("\r\nLog Idle\r\n", func() {
+		var logIdleDialog dialog.Dialog
 		continueOnIdleTask := true
 		var entryOptions []string = make([]string, 0)
 		var accountOptions []string = make([]string, 0)
@@ -733,6 +830,15 @@ func main() {
 		})
 		projectEntry := widget.NewEntry()
 		projectEntry.Disable()
+
+		var workLogHistoryAsStrings = getStringFromHistory(worklogHistory)
+		recentEntry := widget.NewSelect(workLogHistoryAsStrings, func(s string) {
+			var historyEntry WorkLogHistoryEntry
+			json.Unmarshal([]byte(s), &historyEntry)
+			startWorkAndResetUI(historyEntry.Task, historyEntry.Account, historyEntry.Comment)
+			logIdleDialog.Hide()
+		})
+
 		entry := widget.NewSelectEntry(entryOptions)
 		entry.OnChanged = func(changeEntry string) {
 			for _, option := range entryOptions {
@@ -787,6 +893,7 @@ func main() {
 			}
 		}
 		entry.Validator = taskValidator
+		formListRecent := widget.NewFormItem("Choose recent", recentEntry)
 		formItem := widget.NewFormItem("Enter task you did while idle", entry)
 		commentFormItem := widget.NewFormItem("Comment", commentEntry)
 		accountFormItem := widget.NewFormItem("Account", accountEntry)
@@ -798,10 +905,10 @@ func main() {
 		entryCheck.Checked = true
 		formItemCheck := widget.NewFormItem("Continue working on this task", entryCheck)
 
-		logIdleDialog := dialog.NewForm("Logging Idle Time", "                        Enter                        ",
+		logIdleDialog = dialog.NewForm("Logging Idle Time", "                        Enter                        ",
 			"                        Cancel                        ",
 			[]*widget.FormItem{
-				formItem, commentFormItem, accountFormItem, projectFormItem, formItemCheck}, func(validTask bool) {
+				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem, formItemCheck}, func(validTask bool) {
 				if validTask {
 					logIdleWorkAndResetUI(entry.Text, accountSelected, commentEntry.Text)
 					if continueOnIdleTask {
@@ -824,7 +931,7 @@ func main() {
 	})
 	b3.Disable()
 
-	b4 = widget.NewButton("Exit", func() {
+	b4 = widget.NewButton("\r\nExit\r\n", func() {
 		if working {
 			stopWork(currentTask, currentAccount, currentComment)
 		}

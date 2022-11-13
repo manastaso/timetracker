@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -40,7 +41,7 @@ var (
 	currentAccountName          binding.String = binding.NewString()
 	currentComment              binding.String = binding.NewString()
 	currentStatus               binding.String = binding.NewString()
-	currentIP                   binding.String = binding.NewString()
+	currentLocation             binding.String = binding.NewString()
 	currentDate                 binding.String = binding.NewString()
 	currentTaskStartTimeDisplay binding.String = binding.NewString()
 	currentTaskDurationDisplay  binding.String = binding.NewString()
@@ -66,11 +67,39 @@ var (
 	maybeChangeTaskDialogClosed bool = false
 	maybeWorkingDialogClosed    bool = false
 
+	searchJIRAForTasks binding.Bool = binding.NewBool()
+
 	worklogHistory WorkLogHistoryRoot
 )
 
 type MyIPAddress struct {
 	IP string `json:"ip"`
+}
+
+type GeoLocation struct {
+	Query         string  `json:"query"`
+	Status        string  `json:"status"`
+	Continent     string  `json:"continent"`
+	ContinentCode string  `json:"continentCode"`
+	Country       string  `json:"country"`
+	CountryCode   string  `json:"countryCode"`
+	Region        string  `json:"region"`
+	RegionName    string  `json:"regionName"`
+	City          string  `json:"city"`
+	District      string  `json:"district"`
+	Zip           string  `json:"zip"`
+	Lat           float64 `json:"lat"`
+	Lon           float64 `json:"lon"`
+	Timezone      string  `json:"timezone"`
+	Offset        int     `json:"offset"`
+	Currency      string  `json:"currency"`
+	Isp           string  `json:"isp"`
+	Org           string  `json:"org"`
+	As            string  `json:"as"`
+	Asname        string  `json:"asname"`
+	Mobile        bool    `json:"mobile"`
+	Proxy         bool    `json:"proxy"`
+	Hosting       bool    `json:"hosting"`
 }
 
 type myTheme struct{}
@@ -80,6 +109,21 @@ type WorkLogHistoryRoot struct {
 }
 
 type WorkLogHistoryEntry struct {
+	Task        string    `json:"task"`
+	TaskName    string    `json:"taskname"`
+	Account     string    `json:"account"`
+	AccountName string    `json:"accountName"`
+	Comment     string    `json:"comment"`
+	Count       int       `json:"count"`
+	LastUsage   time.Time `json:"time"`
+}
+
+type WorkLogHistoryEntryCountAndLastUsage struct {
+	Count     int       `json:"count"`
+	LastUsage time.Time `json:"time"`
+}
+
+type WorkLogHistoryEntryWithoutCount struct {
 	Task        string `json:"task"`
 	TaskName    string `json:"taskname"`
 	Account     string `json:"account"`
@@ -252,15 +296,15 @@ func init() {
 	myLogger = log.New(io.MultiWriter(logFile), "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 }
 
-func getElementFromStringWithColon(array string, index int) string {
-	if strings.Contains(array, ":") {
-		if len(strings.Split(array, ":")) >= index {
-			return strings.Split(array, ":")[index]
+func getElementFromStringWithColon(input string, index int) string {
+	if strings.Contains(input, ":") {
+		if len(strings.Split(input, ":")) >= index {
+			return strings.Split(input, ":")[index]
 		} else {
-			return strings.Split(array, ":")[0]
+			return strings.Split(input, ":")[0]
 		}
 	} else {
-		return array
+		return input
 	}
 }
 
@@ -276,15 +320,19 @@ func startWork(task string, taskName string, currentTask binding.String, current
 	working = true
 	task = strings.Trim(task, "\n")
 	task = strings.Trim(task, "\r")
+	taskName = strings.TrimSpace(taskName)
 	taskName = strings.Trim(taskName, "\n")
 	taskName = strings.Trim(taskName, "\r")
+	accountName = strings.TrimSpace(accountName)
+	accountName = strings.Trim(accountName, "\n")
+	accountName = strings.Trim(accountName, "\r")
 	currentTaskStartInstant = time.Now()
 	myLogger.Printf("Starting to work on: %s \n", task)
 	currentTask.Set(task)
 	currentTaskName.Set(taskName)
 	currentTaskStartTimeDisplay.Set(time.Now().Format("15:04:05"))
 	currentStatus.Set("Working...")
-	currentIP.Set(getPublicIP())
+	currentLocation.Set(getPublicIP())
 	currentAccount.Set(account)
 	currentAccountName.Set(accountName)
 	currentComment.Set(comment)
@@ -321,7 +369,7 @@ func stopWork(currentTask binding.String, currentTaskName binding.String, curren
 func stopDueToIdleness(currentTask string, currentTaskName string, currentAccount string, currentAccountName string, currentComment string, pointInTimeWhenIWentIdle time.Time) {
 	working = false
 	currentStatus.Set(fmt.Sprintf("Idle since %s", time.Now().Format("15:04:05")))
-	currentIP.Set(getPublicIP())
+	currentLocation.Set(getPublicIP())
 	myLogger.Printf("Idling for %f minutes (%f seconds) while on %s\n", time.Since(pointInTimeWhenIWentIdle).Minutes(), time.Since(pointInTimeWhenIWentIdle).Seconds(), currentTask)
 	myLogger.Printf("Logging %f minutes (%f seconds)  on %s\n", pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes(), pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Seconds(), currentTask)
 	writtenBytes, err := fmt.Fprintf(workLogWriter, "%s;%s;%s;%s;%s;%s;%g\r", getPublicIP(), currentTask, currentTaskStartInstant.Format("2006-01-02"), currentTaskStartInstant.Format("15:04:05"), pointInTimeWhenIWentIdle.Format("2006-01-02"), pointInTimeWhenIWentIdle.Format("15:04:05"), math.Round(pointInTimeWhenIWentIdle.Sub(currentTaskStartInstant).Minutes()))
@@ -453,6 +501,42 @@ func getPublicIP() string {
 	}
 }
 
+func getMyLocation() string {
+	client := &http.Client{
+		Timeout: time.Second * 60,
+	}
+
+	url := "http://ip-api.com/json/"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		s := fmt.Sprintf("\nGot error %s", err.Error())
+		log.Printf(s)
+		dialog.NewError(err, myWindow)
+	}
+	myLogger.Printf("Requesting geo location from %s", url)
+
+	resp, err := client.Do(req)
+
+	if err != nil {
+		myLogger.Printf("\nGot error %s", err.Error())
+		dialog.NewError(err, myWindow).Show()
+		return "no network"
+	} else {
+
+		myLogger.Printf("Got Response Code %s", resp.Status)
+
+		defer resp.Body.Close()
+
+		var myLocation GeoLocation
+		err = json.NewDecoder(resp.Body).Decode(&myLocation)
+		if err != nil {
+			myLogger.Printf("\nDecode Failed %s", err.Error())
+		}
+
+		return fmt.Sprintf("%s, %s", myLocation.Query, myLocation.City)
+	}
+}
+
 func getProjectAndAccountForIssue(issue string) IssueWithProjectAndActivity {
 	issue = url.QueryEscape(issue)
 	url := fmt.Sprintf("https://jira.surecomp.com/rest/api/latest/issue/%s?fields=project,customfield_10900", issue)
@@ -462,7 +546,7 @@ func getProjectAndAccountForIssue(issue string) IssueWithProjectAndActivity {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer xxx")
+	req.Header.Set("Authorization", xxx)
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -503,7 +587,7 @@ func getAccountsForProject(projectID string) []string {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer xxx")
+	req.Header.Set("Authorization", xxx)
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -542,6 +626,11 @@ func getAccountsForProject(projectID string) []string {
 
 func searchJIRAIsssue(q string) []string {
 	var result []string = make([]string, 0)
+
+	if checkJIRA, _ := searchJIRAForTasks.Get(); !checkJIRA {
+		return result
+	}
+
 	q = url.QueryEscape(q)
 	url := fmt.Sprintf("https://jira.surecomp.com/rest/quicksearch/1.0/productsearch/search?q=%s&_=%d", q, time.Now().UnixMilli())
 
@@ -550,7 +639,7 @@ func searchJIRAIsssue(q string) []string {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer xxx")
+	req.Header.Set("Authorization", xxx)
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -599,7 +688,7 @@ func searchJIRAIsssue(q string) []string {
 
 func postWorkLog(task string, taskName string, account string, accountName string, comment string, duration time.Duration) {
 	saveWorkLogToHistory(task, taskName, account, accountName, comment)
-	myIP := getPublicIP()
+	myLocation := getPublicIP()
 
 	var originTaskID string
 	var accountValue string
@@ -612,16 +701,16 @@ func postWorkLog(task string, taskName string, account string, accountName strin
 	}
 	var finalComment string
 	if comment != "" {
-		finalComment = fmt.Sprintf("%s\nWorking from %s\nAutomatically filled by MyTracker written in GoLang", comment, myIP)
+		finalComment = fmt.Sprintf("%s\nWorking from %s\nAutomatically filled by MyTracker written in GoLang", comment, myLocation)
 	} else {
-		finalComment = fmt.Sprintf("%s\nWorking from %s\nAutomatically filled by MyTracker written in GoLang", task, myIP)
+		finalComment = fmt.Sprintf("%s\nWorking from %s\nAutomatically filled by MyTracker written in GoLang", task, myLocation)
 	}
 	today := time.Now().Format("2006-01-02")
 	durationInSeconds := int(duration.Seconds())
 	buf := new(bytes.Buffer)
 
 	var workLocation string
-	if strings.HasPrefix(myIP, "89.245") {
+	if strings.HasPrefix(myLocation, "89.245") {
 		workLocation = "Office"
 	} else {
 		workLocation = "Home"
@@ -648,7 +737,7 @@ func postWorkLog(task string, taskName string, account string, accountName strin
 	}
 
 	req, err := http.NewRequest("POST", "https://jira.surecomp.com/rest/tempo-timesheets/4/worklogs", buf)
-	req.Header.Set("Authorization", "Bearer xxx")
+	req.Header.Set("Authorization", xxx)
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -683,26 +772,78 @@ func getStringFromHistory(worklogHistory WorkLogHistoryRoot) []string {
 	return list
 }
 
-func removeDuplicatesFromWorkLogHistory(worklogHistory WorkLogHistoryRoot) []WorkLogHistoryEntry {
-	history := worklogHistory.WorkLogHistory
+func getIdOfHistoryEntry(entry WorkLogHistoryEntry) WorkLogHistoryEntryWithoutCount {
+	u := WorkLogHistoryEntryWithoutCount{
+		Task:        entry.Task,
+		TaskName:    entry.TaskName,
+		Account:     entry.Account,
+		AccountName: entry.AccountName,
+		Comment:     entry.Comment,
+	}
+	return u
+}
 
-	keys := make(map[WorkLogHistoryEntry]bool)
+func sortWorkLogHistory(worklogHistory WorkLogHistoryRoot) []WorkLogHistoryEntry {
+	history := worklogHistory.WorkLogHistory
+	historyMap := make(map[WorkLogHistoryEntryWithoutCount]WorkLogHistoryEntryCountAndLastUsage)
 	list := []WorkLogHistoryEntry{}
 	for _, entry := range history {
-		if _, value := keys[entry]; !value {
-			keys[entry] = true
-			list = append(list, entry)
+		if keyCountAndLastUsage, keyFound := historyMap[getIdOfHistoryEntry(entry)]; !keyFound {
+			u := WorkLogHistoryEntryCountAndLastUsage{
+				Count:     entry.Count,
+				LastUsage: entry.LastUsage,
+			}
+			historyMap[getIdOfHistoryEntry(entry)] = u
+		} else {
+			var l time.Time
+			if keyCountAndLastUsage.LastUsage.After(entry.LastUsage) {
+				l = keyCountAndLastUsage.LastUsage
+			} else {
+				l = entry.LastUsage
+			}
+			u := WorkLogHistoryEntryCountAndLastUsage{
+				Count:     keyCountAndLastUsage.Count + 1,
+				LastUsage: l,
+			}
+			historyMap[getIdOfHistoryEntry(entry)] = u
+			entry.Count = keyCountAndLastUsage.Count + 1
+			entry.LastUsage = l
 		}
+	}
+
+	for key, value := range historyMap {
+		u := WorkLogHistoryEntry{
+			Task:        key.Task,
+			TaskName:    key.TaskName,
+			Account:     key.Account,
+			AccountName: key.AccountName,
+			Comment:     key.Comment,
+			Count:       value.Count,
+			LastUsage:   value.LastUsage,
+		}
+		list = append(list, u)
 	}
 	return list
 
 }
 
-func removeIndex(s []WorkLogHistoryEntry, index int) []WorkLogHistoryEntry {
-	ret := make([]WorkLogHistoryEntry, 0)
-	ret = append(ret, s[:index]...)
-	s[index] = WorkLogHistoryEntry{}
-	return append(ret, s[index+1:]...)
+func removeLeastUsedTasksFromHistory(history []WorkLogHistoryEntry) []WorkLogHistoryEntry {
+	sort.SliceStable(history, func(i, j int) bool {
+		return history[i].Count > history[j].Count
+	})
+	sort.SliceStable(history, func(i, j int) bool {
+		if history[i].Count == history[j].Count {
+			return history[i].LastUsage.After(history[j].LastUsage)
+		} else {
+			return history[i].Count > history[j].Count
+		}
+	})
+	if len(history) > 10 {
+		ret := make([]WorkLogHistoryEntry, 0)
+		return append(ret, history[0:10]...)
+	} else {
+		return history
+	}
 }
 
 func saveWorkLogToHistory(task string, taskName string, account string, accountName string, comment string) {
@@ -723,13 +864,13 @@ func saveWorkLogToHistory(task string, taskName string, account string, accountN
 		Account:     account,
 		AccountName: accountName,
 		Comment:     comment,
+		Count:       1,
+		LastUsage:   time.Now(),
 	}
 
 	worklogHistory.WorkLogHistory = append(worklogHistory.WorkLogHistory, u)
-	worklogHistory.WorkLogHistory = removeDuplicatesFromWorkLogHistory(worklogHistory)
-	if len(worklogHistory.WorkLogHistory) > 10 {
-		worklogHistory.WorkLogHistory = removeIndex(worklogHistory.WorkLogHistory, 0)
-	}
+	worklogHistory.WorkLogHistory = sortWorkLogHistory(worklogHistory)
+	worklogHistory.WorkLogHistory = removeLeastUsedTasksFromHistory(worklogHistory.WorkLogHistory)
 
 	json.NewEncoder(buf).Encode(&worklogHistory)
 
@@ -784,8 +925,8 @@ func main() {
 	currentStatusLabel.TextStyle = fyne.TextStyle{Bold: true}
 	currentStatusLabel.Alignment = fyne.TextAlignCenter
 
-	currentIP.Set(getPublicIP())
-	currentIPLabel := widget.NewLabelWithData(currentIP)
+	currentLocation.Set(getPublicIP())
+	currentIPLabel := widget.NewLabelWithData(currentLocation)
 	currentIPLabel.TextStyle = fyne.TextStyle{Bold: true}
 	currentIPLabel.Alignment = fyne.TextAlignCenter
 
@@ -951,20 +1092,30 @@ func main() {
 		commentFormItem := widget.NewFormItem("Comment", commentEntry)
 		accountFormItem := widget.NewFormItem("Account", accountEntry)
 		projectFormItem := widget.NewFormItem("Project", projectEntry)
+		jiraCheck := widget.NewCheckWithData("", searchJIRAForTasks)
+		formItemJIRACheck := widget.NewFormItem("Search JIRA for tasks?", jiraCheck)
 
 		startDialog = dialog.NewForm("Starting a task", "                        Enter                        ",
 			"                        Cancel                        ",
 			[]*widget.FormItem{
-				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem}, func(validTask bool) {
+				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem, formItemJIRACheck}, func(validTask bool) {
 				if validTask {
-					startWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+					if accountSelected != "" {
+						startWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+					} else {
+						startWorkAndResetUI(entry.Text, entry.Text, accountSelected, accountSelected, commentEntry.Text)
+					}
 				}
 			}, myWindow)
 
 		entry.OnSubmitted = func(entryString string) {
 			entryError := entry.Validate()
 			if entryError == nil {
-				startWorkAndResetUI(getElementFromStringWithColon(entryString, 0), getElementFromStringWithColon(entryString, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+				if accountSelected != "" {
+					startWorkAndResetUI(getElementFromStringWithColon(entryString, 0), getElementFromStringWithColon(entryString, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+				} else {
+					startWorkAndResetUI(entry.Text, entry.Text, accountSelected, accountSelected, commentEntry.Text)
+				}
 				startDialog.Hide()
 			}
 		}
@@ -1115,6 +1266,10 @@ func main() {
 		accountFormItem := widget.NewFormItem("Account", accountEntry)
 		projectFormItem := widget.NewFormItem("Project", projectEntry)
 
+		jiraCheck := widget.NewCheckWithData("", searchJIRAForTasks)
+		jiraCheck.Checked = true
+		formItemJIRACheck := widget.NewFormItem("Search JIRA for tasks?", jiraCheck)
+
 		entryCheck := widget.NewCheck("", func(checked bool) {
 			continueOnIdleTask = checked
 		})
@@ -1124,20 +1279,34 @@ func main() {
 		logIdleDialog = dialog.NewForm("Logging Idle Time", "                        Enter                        ",
 			"                        Cancel                        ",
 			[]*widget.FormItem{
-				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem, formItemCheck}, func(validTask bool) {
+				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem, formItemJIRACheck, formItemCheck}, func(validTask bool) {
 				if validTask {
-					logIdleWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
-					if continueOnIdleTask {
-						startWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+					if accountSelected != "" {
+						logIdleWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+						if continueOnIdleTask {
+							startWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+						}
+					} else {
+						logIdleWorkAndResetUI(entry.Text, entry.Text, accountSelected, accountSelected, commentEntry.Text)
+						if continueOnIdleTask {
+							startWorkAndResetUI(entry.Text, entry.Text, accountSelected, accountSelected, commentEntry.Text)
+						}
 					}
 				}
 			}, myWindow)
 		entry.OnSubmitted = func(entryString string) {
 			entryError := entry.Validate()
 			if entryError == nil {
-				logIdleWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
-				if continueOnIdleTask {
-					startWorkAndResetUI(getElementFromStringWithColon(entryString, 0), getElementFromStringWithColon(entryString, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+				if accountSelected != "" {
+					logIdleWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+					if continueOnIdleTask {
+						startWorkAndResetUI(getElementFromStringWithColon(entryString, 0), getElementFromStringWithColon(entryString, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
+					}
+				} else {
+					logIdleWorkAndResetUI(entry.Text, entry.Text, accountSelected, accountSelected, commentEntry.Text)
+					if continueOnIdleTask {
+						startWorkAndResetUI(entry.Text, entry.Text, accountSelected, accountSelected, commentEntry.Text)
+					}
 				}
 				logIdleDialog.Hide()
 			}
@@ -1154,11 +1323,12 @@ func main() {
 		myApp.Quit()
 	})
 
-	labelsPlusStart := container.New(layout.NewVBoxLayout(), currentTaskLabelName, widget.NewSeparator(), currentCommentLabelName, widget.NewSeparator(), currentAccountLabelName, widget.NewSeparator(), startLabelName, widget.NewSeparator(), durationLabelName, widget.NewSeparator(), idleDurationLabelName, b1)
+	sep := container.New(layout.NewGridWrapLayout(fyne.NewSize(0, 14)), layout.NewSpacer())
+	labelsPlusStart := container.New(layout.NewVBoxLayout(), currentTaskLabelName, sep, widget.NewSeparator(), currentCommentLabelName, sep, widget.NewSeparator(), currentAccountLabelName, sep, widget.NewSeparator(), startLabelName, sep, widget.NewSeparator(), durationLabelName, sep, widget.NewSeparator(), idleDurationLabelName, sep, b1)
 	b2b3 := container.New(layout.NewGridLayout(2), b2, b3)
-	taskGroup := container.New(layout.NewGridLayout(2), currentTaskLabelValue, currentTaskNameValue)
-	acccountGroup := container.New(layout.NewGridLayout(2), currentAccountLabelValue, currentAccountNameValue)
-	entriesPlusStopPlusIdle := container.New(layout.NewVBoxLayout(), taskGroup, widget.NewSeparator(), currentCommentLabelValue, widget.NewSeparator(), acccountGroup, widget.NewSeparator(), startLabelValue, widget.NewSeparator(), durationLabelValue, widget.NewSeparator(), idleDurationLabelValue, b2b3)
+	taskGroup := container.New(layout.NewGridLayout(2), container.New(layout.NewGridWrapLayout(fyne.NewSize(200, 59)), currentTaskLabelValue), container.New(layout.NewGridWrapLayout(fyne.NewSize(200, 59)), currentTaskNameValue))
+	acccountGroup := container.New(layout.NewGridLayout(2), container.New(layout.NewGridWrapLayout(fyne.NewSize(200, 59)), currentAccountLabelValue), container.New(layout.NewGridWrapLayout(fyne.NewSize(200, 59)), currentAccountNameValue))
+	entriesPlusStopPlusIdle := container.New(layout.NewVBoxLayout(), taskGroup, container.New(layout.NewGridWrapLayout(fyne.NewSize(404, 59)), currentCommentLabelValue), acccountGroup, container.New(layout.NewGridWrapLayout(fyne.NewSize(404, 59)), startLabelValue), container.New(layout.NewGridWrapLayout(fyne.NewSize(404, 59)), durationLabelValue), container.New(layout.NewGridWrapLayout(fyne.NewSize(404, 59)), idleDurationLabelValue), b2b3)
 
 	datePLusIP := container.New(layout.NewVBoxLayout(), dateLabel, currentIPLabel)
 	statusIcon := container.New(layout.NewBorderLayout(datePLusIP, currentStatusLabel, nil, nil), iconWidget, currentStatusLabel, datePLusIP)
@@ -1168,7 +1338,7 @@ func main() {
 
 	go func() {
 		for range idlenessTicker.C {
-			currentDate.Set(time.Now().Format("02.01.2006 15:04:05"))
+			currentDate.Set(time.Now().Format("Date: 02.01.2006\r\nTime: 15:04:05"))
 			currentTaskBoundString, currentTaskBindingError := currentTask.Get()
 			currentTaskNameBoundString, _ := currentTaskName.Get()
 			currenAccountBoundString, _ := currentAccount.Get()

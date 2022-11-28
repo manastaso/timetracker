@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image/color"
 	"io"
+	"io/ioutil"
 	"log"
 	"math"
 	"net/http"
@@ -47,13 +48,18 @@ var (
 	currentTaskDurationDisplay  binding.String = binding.NewString()
 	idlenessDurationDisplay     binding.String = binding.NewString()
 	idlenessInstantDisplay      binding.String = binding.NewString()
-	b1                          *widget.Button
-	b2                          *widget.Button
-	b3                          *widget.Button
-	b4                          *widget.Button
-	workLogWriter               *bufio.Writer
-	working                     bool = false
-	myLogger                    *log.Logger
+	bingCopyright               string
+	bingCopyrightLink           *url.URL
+	stories                     []Story
+	icon                        fyne.Resource
+
+	b1            *widget.Button
+	b2            *widget.Button
+	b3            *widget.Button
+	b4            *widget.Button
+	workLogWriter *bufio.Writer
+	working       bool = false
+	myLogger      *log.Logger
 
 	user32           = syscall.MustLoadDLL("user32.dll")
 	kernel32         = syscall.MustLoadDLL("kernel32.dll")
@@ -72,8 +78,47 @@ var (
 	worklogHistory WorkLogHistoryRoot
 )
 
+type Story struct {
+	By          string `json:"by"`
+	Descendants int    `json:"descendants"`
+	ID          int    `json:"id"`
+	Kids        []int  `json:"kids"`
+	Score       int    `json:"score"`
+	Time        int    `json:"time"`
+	Title       string `json:"title"`
+	Type        string `json:"type"`
+	URL         string `json:"url"`
+}
+
 type MyIPAddress struct {
 	IP string `json:"ip"`
+}
+
+type BingImageOfTheDay struct {
+	Images []struct {
+		Startdate     string        `json:"startdate"`
+		Fullstartdate string        `json:"fullstartdate"`
+		Enddate       string        `json:"enddate"`
+		URL           string        `json:"url"`
+		Urlbase       string        `json:"urlbase"`
+		Copyright     string        `json:"copyright"`
+		Copyrightlink string        `json:"copyrightlink"`
+		Title         string        `json:"title"`
+		Quiz          string        `json:"quiz"`
+		Wp            bool          `json:"wp"`
+		Hsh           string        `json:"hsh"`
+		Drk           int           `json:"drk"`
+		Top           int           `json:"top"`
+		Bot           int           `json:"bot"`
+		Hs            []interface{} `json:"hs"`
+	} `json:"images"`
+	Tooltips struct {
+		Loading  string `json:"loading"`
+		Previous string `json:"previous"`
+		Next     string `json:"next"`
+		Walle    string `json:"walle"`
+		Walls    string `json:"walls"`
+	} `json:"tooltips"`
 }
 
 type GeoLocation struct {
@@ -501,6 +546,200 @@ func getPublicIP() string {
 	}
 }
 
+func getBingImageOfTheDay() fyne.Resource {
+
+	defaulticon, _ := fyne.LoadResourceFromPath("icon.jpg")
+
+	client := &http.Client{
+		Timeout: time.Second * 60,
+	}
+
+	url := "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=en-US"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		s := fmt.Sprintf("\nGot error %s", err.Error())
+		log.Printf(s)
+		dialog.NewError(err, myWindow)
+	}
+	myLogger.Printf("Requesting Bing Image of the day from %s", url)
+
+	resp, err := client.Do(req)
+
+	if err != nil {
+		myLogger.Printf("\nGot error %s", err.Error())
+		dialog.NewError(err, myWindow).Show()
+		return defaulticon
+	} else {
+
+		myLogger.Printf("Got Response Code %s", resp.Status)
+
+		defer resp.Body.Close()
+
+		var myBingImage BingImageOfTheDay
+		err = json.NewDecoder(resp.Body).Decode(&myBingImage)
+		if err != nil {
+			myLogger.Printf("\nDecode Failed %s", err.Error())
+		}
+
+		if len(myBingImage.Images) > 0 {
+			bingCopyrightLink = parseURL(myBingImage.Images[0].Copyrightlink)
+			bingCopyright = myBingImage.Images[0].Copyright
+
+			icon, err := fyne.LoadResourceFromURLString("https://www.bing.com" + myBingImage.Images[0].URL)
+			if err != nil {
+				myLogger.Printf("\nFetching Bing Image Failed %s", err.Error())
+				return defaulticon
+			} else {
+				return icon
+			}
+		} else {
+			return defaulticon
+		}
+
+	}
+}
+
+func firstN(s string, n int) string {
+	i := 0
+	for j := range s {
+		if i == n {
+			return s[:j] + "..."
+		}
+		i++
+	}
+	return s
+}
+
+func firstNStories(s []int, n int) []int {
+	i := 0
+	for j := range s {
+		if i == n {
+			return s[:j]
+		}
+		i++
+	}
+	return s
+}
+
+func parseURL(urlStr string) *url.URL {
+	link, err := url.Parse(urlStr)
+	if err != nil {
+		myLogger.Printf("Could not parse URL", err)
+	}
+
+	return link
+}
+
+func getBingImageData(myBingImage BingImageOfTheDay) []byte {
+
+	client := &http.Client{
+		Timeout: time.Second * 60,
+	}
+
+	url := myBingImage.Images[0].URL
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		s := fmt.Sprintf("\nGot error %s", err.Error())
+		log.Printf(s)
+		dialog.NewError(err, myWindow)
+	}
+	myLogger.Printf("Requesting Bing Image of the day from %s", url)
+
+	resp, err := client.Do(req)
+
+	if err != nil {
+		myLogger.Printf("\nGot error %s", err.Error())
+		dialog.NewError(err, myWindow).Show()
+		return []byte{}
+	} else {
+
+		myLogger.Printf("Got Response Code %s", resp.Status)
+
+		defer resp.Body.Close()
+
+		data, _ := ioutil.ReadAll(resp.Body)
+		return data
+	}
+}
+
+func getMyTopStories() []Story {
+	client := &http.Client{
+		Timeout: time.Second * 60,
+	}
+
+	url := "https://hacker-news.firebaseio.com/v0/topstories.json"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		s := fmt.Sprintf("\nGot error %s", err.Error())
+		log.Printf(s)
+		dialog.NewError(err, myWindow)
+	}
+	myLogger.Printf("Requesting top stories from %s", url)
+
+	resp, err := client.Do(req)
+
+	if err != nil {
+		myLogger.Printf("\nGot error %s", err.Error())
+		dialog.NewError(err, myWindow).Show()
+		return []Story{}
+	} else {
+
+		myLogger.Printf("Got Response Code %s", resp.Status)
+
+		defer resp.Body.Close()
+
+		var myTopStories []int = make([]int, 0)
+		err = json.NewDecoder(resp.Body).Decode(&myTopStories)
+		if err != nil {
+			myLogger.Printf("\nDecode Failed %s", err.Error())
+		}
+
+		var topStoryCollection []Story = make([]Story, 0)
+		for _, story := range firstNStories(myTopStories, 20) {
+			topStoryCollection = append(topStoryCollection, getStoryDetails(story))
+		}
+		return topStoryCollection
+	}
+}
+
+func getStoryDetails(story int) Story {
+	client := &http.Client{
+		Timeout: time.Second * 60,
+	}
+
+	url := fmt.Sprintf("https://hacker-news.firebaseio.com/v0/item/%d.json", story)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		s := fmt.Sprintf("\nGot error %s", err.Error())
+		log.Printf(s)
+		dialog.NewError(err, myWindow)
+	}
+	myLogger.Printf("Requesting story from %s", url)
+
+	resp, err := client.Do(req)
+
+	if err != nil {
+		myLogger.Printf("\nGot error %s", err.Error())
+		dialog.NewError(err, myWindow).Show()
+		return Story{}
+	} else {
+
+		myLogger.Printf("Got Response Code %s", resp.Status)
+
+		defer resp.Body.Close()
+
+		var myStory Story
+		err = json.NewDecoder(resp.Body).Decode(&myStory)
+		if err != nil {
+			myLogger.Printf("\nDecode Failed %s", err.Error())
+		}
+		if myStory.URL == "" {
+			myStory.URL = fmt.Sprintf("https://news.ycombinator.com/item?id=%d", story)
+		}
+		return myStory
+	}
+}
+
 func getMyLocation() string {
 	client := &http.Client{
 		Timeout: time.Second * 60,
@@ -546,7 +785,7 @@ func getProjectAndAccountForIssue(issue string) IssueWithProjectAndActivity {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", xxx)
+	req.Header.Set("Authorization", "Bearer ")
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -587,7 +826,7 @@ func getAccountsForProject(projectID string) []string {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", xxx)
+	req.Header.Set("Authorization", "Bearer ")
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -639,7 +878,7 @@ func searchJIRAIsssue(q string) []string {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", xxx)
+	req.Header.Set("Authorization", "Bearer ")
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -737,7 +976,7 @@ func postWorkLog(task string, taskName string, account string, accountName strin
 	}
 
 	req, err := http.NewRequest("POST", "https://jira.surecomp.com/rest/tempo-timesheets/4/worklogs", buf)
-	req.Header.Set("Authorization", xxx)
+	req.Header.Set("Authorization", "Bearer ")
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -761,14 +1000,33 @@ func postWorkLog(task string, taskName string, account string, accountName strin
 	}
 }
 
-func getStringFromHistory(worklogHistory WorkLogHistoryRoot) []string {
+func getStringFromHistory(worklogHistory WorkLogHistoryRoot, recencyMode string) []string {
 	history := worklogHistory.WorkLogHistory
+
+	if recencyMode == "LFU" {
+		sort.SliceStable(history, func(i, j int) bool {
+			return history[i].Count > history[j].Count
+		})
+	} else if recencyMode == "LRU" {
+		sort.SliceStable(history, func(i, j int) bool {
+			return history[i].LastUsage.After(history[j].LastUsage)
+		})
+	} else if recencyMode == "A to Z" {
+		sort.SliceStable(history, func(i, j int) bool {
+			return history[i].Task < (history[j].Task)
+		})
+	} else if recencyMode == "Z to A" {
+		sort.SliceStable(history, func(i, j int) bool {
+			return history[i].Task > (history[j].Task)
+		})
+	}
 
 	list := []string{}
 	for _, entry := range history {
 		buff, _ := json.Marshal(entry)
 		list = append(list, fmt.Sprintf("%s", buff))
 	}
+
 	return list
 }
 
@@ -827,7 +1085,7 @@ func sortWorkLogHistory(worklogHistory WorkLogHistoryRoot) []WorkLogHistoryEntry
 
 }
 
-func removeLeastUsedTasksFromHistory(history []WorkLogHistoryEntry) []WorkLogHistoryEntry {
+func sortTasksFromHistory(history []WorkLogHistoryEntry) []WorkLogHistoryEntry {
 	sort.SliceStable(history, func(i, j int) bool {
 		return history[i].Count > history[j].Count
 	})
@@ -838,12 +1096,7 @@ func removeLeastUsedTasksFromHistory(history []WorkLogHistoryEntry) []WorkLogHis
 			return history[i].Count > history[j].Count
 		}
 	})
-	if len(history) > 10 {
-		ret := make([]WorkLogHistoryEntry, 0)
-		return append(ret, history[0:10]...)
-	} else {
-		return history
-	}
+	return history
 }
 
 func saveWorkLogToHistory(task string, taskName string, account string, accountName string, comment string) {
@@ -870,7 +1123,7 @@ func saveWorkLogToHistory(task string, taskName string, account string, accountN
 
 	worklogHistory.WorkLogHistory = append(worklogHistory.WorkLogHistory, u)
 	worklogHistory.WorkLogHistory = sortWorkLogHistory(worklogHistory)
-	worklogHistory.WorkLogHistory = removeLeastUsedTasksFromHistory(worklogHistory.WorkLogHistory)
+	worklogHistory.WorkLogHistory = sortTasksFromHistory(worklogHistory.WorkLogHistory)
 
 	json.NewEncoder(buf).Encode(&worklogHistory)
 
@@ -910,14 +1163,14 @@ func main() {
 
 	defer workLogFile.Close()
 
-	r, _ := fyne.LoadResourceFromPath("icon.jpg")
 	myApp := app.NewWithID("GoTimeTracker")
 	myWindow = myApp.NewWindow("MyTimeTracker")
 	myApp.Settings().SetTheme(&myTheme{})
-	myWindow.SetIcon(r)
+	icon = getBingImageOfTheDay()
+	myWindow.SetIcon(icon)
 	myWindow.Resize(fyne.NewSize(1200, 200))
 
-	iconWidget := widget.NewIcon(r)
+	iconWidget := widget.NewIcon(icon)
 	iconWidget.Resize(fyne.Size{100, 50})
 
 	currentStatus.Set("Not Working")
@@ -929,6 +1182,10 @@ func main() {
 	currentIPLabel := widget.NewLabelWithData(currentLocation)
 	currentIPLabel.TextStyle = fyne.TextStyle{Bold: true}
 	currentIPLabel.Alignment = fyne.TextAlignCenter
+
+	currentCopyRightLabelLink := widget.NewHyperlink("", bingCopyrightLink)
+	currentCopyRightLabelLink.TextStyle = fyne.TextStyle{Bold: true}
+	currentCopyRightLabelLink.Alignment = fyne.TextAlignCenter
 
 	dateLabel := widget.NewLabelWithData(currentDate)
 	dateLabel.TextStyle = fyne.TextStyle{Bold: true}
@@ -1021,13 +1278,14 @@ func main() {
 
 		commentEntry := widget.NewEntry()
 
-		var workLogHistoryAsStrings = getStringFromHistory(worklogHistory)
+		var workLogHistoryAsStrings = getStringFromHistory(worklogHistory, "LRU")
 		recentEntry := widget.NewSelect(workLogHistoryAsStrings, func(s string) {
 			var historyEntry WorkLogHistoryEntry
 			json.Unmarshal([]byte(s), &historyEntry)
 			startWorkAndResetUI(historyEntry.Task, historyEntry.TaskName, historyEntry.Account, historyEntry.AccountName, historyEntry.Comment)
 			startDialog.Hide()
 		})
+
 		entry := widget.NewSelectEntry(entryOptions)
 		entry.OnChanged = func(changeEntry string) {
 			accountOptions = nil
@@ -1094,11 +1352,18 @@ func main() {
 		projectFormItem := widget.NewFormItem("Project", projectEntry)
 		jiraCheck := widget.NewCheckWithData("", searchJIRAForTasks)
 		formItemJIRACheck := widget.NewFormItem("Search JIRA for tasks?", jiraCheck)
+		radio := widget.NewRadioGroup([]string{"LRU", "LFU", "A to Z", "Z to A"}, func(value string) {
+			recentEntry.Options = getStringFromHistory(worklogHistory, value)
+			recentEntry.Refresh()
+		})
+		radio.Horizontal = true
+		radio.Selected = "LRU"
+		formItemRecencyMode := widget.NewFormItem("Recency Mode?", radio)
 
 		startDialog = dialog.NewForm("Starting a task", "                        Enter                        ",
 			"                        Cancel                        ",
 			[]*widget.FormItem{
-				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem, formItemJIRACheck}, func(validTask bool) {
+				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem, formItemJIRACheck, formItemRecencyMode}, func(validTask bool) {
 				if validTask {
 					if accountSelected != "" {
 						startWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
@@ -1190,7 +1455,7 @@ func main() {
 		projectEntry := widget.NewEntry()
 		projectEntry.Disable()
 
-		var workLogHistoryAsStrings = getStringFromHistory(worklogHistory)
+		var workLogHistoryAsStrings = getStringFromHistory(worklogHistory, "LRU")
 		recentEntry := widget.NewSelect(workLogHistoryAsStrings, func(s string) {
 			var historyEntry WorkLogHistoryEntry
 			json.Unmarshal([]byte(s), &historyEntry)
@@ -1269,6 +1534,13 @@ func main() {
 		jiraCheck := widget.NewCheckWithData("", searchJIRAForTasks)
 		jiraCheck.Checked = true
 		formItemJIRACheck := widget.NewFormItem("Search JIRA for tasks?", jiraCheck)
+		radio := widget.NewRadioGroup([]string{"LRU", "LFU", "A to Z", "Z to A"}, func(value string) {
+			recentEntry.Options = getStringFromHistory(worklogHistory, value)
+			recentEntry.Refresh()
+		})
+		radio.Horizontal = true
+		radio.Selected = "LRU"
+		formItemRecencyMode := widget.NewFormItem("Recency Mode?", radio)
 
 		entryCheck := widget.NewCheck("", func(checked bool) {
 			continueOnIdleTask = checked
@@ -1279,7 +1551,7 @@ func main() {
 		logIdleDialog = dialog.NewForm("Logging Idle Time", "                        Enter                        ",
 			"                        Cancel                        ",
 			[]*widget.FormItem{
-				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem, formItemJIRACheck, formItemCheck}, func(validTask bool) {
+				formListRecent, formItem, commentFormItem, accountFormItem, projectFormItem, formItemJIRACheck, formItemRecencyMode, formItemCheck}, func(validTask bool) {
 				if validTask {
 					if accountSelected != "" {
 						logIdleWorkAndResetUI(getElementFromStringWithColon(entry.Text, 0), getElementFromStringWithColon(entry.Text, 1), getElementFromStringWithColon(accountSelected, 0), getElementFromStringWithColon(accountSelected, 1), commentEntry.Text)
@@ -1330,15 +1602,43 @@ func main() {
 	acccountGroup := container.New(layout.NewGridLayout(2), container.New(layout.NewGridWrapLayout(fyne.NewSize(200, 59)), currentAccountLabelValue), container.New(layout.NewGridWrapLayout(fyne.NewSize(200, 59)), currentAccountNameValue))
 	entriesPlusStopPlusIdle := container.New(layout.NewVBoxLayout(), taskGroup, container.New(layout.NewGridWrapLayout(fyne.NewSize(404, 59)), currentCommentLabelValue), acccountGroup, container.New(layout.NewGridWrapLayout(fyne.NewSize(404, 59)), startLabelValue), container.New(layout.NewGridWrapLayout(fyne.NewSize(404, 59)), durationLabelValue), container.New(layout.NewGridWrapLayout(fyne.NewSize(404, 59)), idleDurationLabelValue), b2b3)
 
-	datePLusIP := container.New(layout.NewVBoxLayout(), dateLabel, currentIPLabel)
-	statusIcon := container.New(layout.NewBorderLayout(datePLusIP, currentStatusLabel, nil, nil), iconWidget, currentStatusLabel, datePLusIP)
-	iconPlusExit := container.New(layout.NewBorderLayout(nil, b4, nil, nil), statusIcon, b4)
+	stories = getMyTopStories()
+	newsList := widget.NewList(
+		func() int {
+			return len(stories)
+		},
+		func() fyne.CanvasObject {
+			return widget.NewHyperlink("template", parseURL("www.google.de"))
+		},
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			o.(*widget.Hyperlink).SetText(stories[i].Title)
+			o.(*widget.Hyperlink).SetURL(parseURL(stories[i].URL))
+		})
+
+	datePLusIP := container.New(layout.NewGridLayout(2), container.New(layout.NewGridWrapLayout(fyne.NewSize(200, 59)), dateLabel), container.New(layout.NewGridWrapLayout(fyne.NewSize(200, 59)), currentIPLabel))
+	tabs := container.NewAppTabs(
+		container.NewTabItem("News", newsList),
+		container.NewTabItem(bingCopyright, container.NewMax(currentCopyRightLabelLink, iconWidget)))
+	tabs.SetTabLocation(container.TabLocationTop)
+
+	iconPlusExit := container.New(layout.NewVBoxLayout(), datePLusIP, widget.NewSeparator(), container.New(layout.NewGridWrapLayout(fyne.NewSize(400, 59)), currentStatusLabel), widget.NewSeparator(), container.New(layout.NewGridWrapLayout(fyne.NewSize(400, 238)), tabs), b4)
 	main := container.New(layout.NewGridLayout(3), labelsPlusStart, entriesPlusStopPlusIdle, iconPlusExit)
 	myWindow.SetContent(main)
 
 	go func() {
 		for range idlenessTicker.C {
 			currentDate.Set(time.Now().Format("Date: 02.01.2006\r\nTime: 15:04:05"))
+			if (time.Now().Unix()+1)%3600 == 0 {
+				myLogger.Printf("Refreshing news feed and image of the day")
+				stories = getMyTopStories()
+				newsList.Refresh()
+				icon = getBingImageOfTheDay()
+				iconWidget.SetResource(icon)
+				tabs.SetItems([]*container.TabItem{
+					container.NewTabItem("News", newsList),
+					container.NewTabItem(bingCopyright, container.NewMax(currentCopyRightLabelLink, iconWidget))})
+				myLogger.Printf("Refreshed news feed and image of the day")
+			}
 			currentTaskBoundString, currentTaskBindingError := currentTask.Get()
 			currentTaskNameBoundString, _ := currentTaskName.Get()
 			currenAccountBoundString, _ := currentAccount.Get()
@@ -1384,6 +1684,7 @@ func main() {
 	}()
 
 	myWindow.CenterOnScreen()
+	myWindow.SetFixedSize(true)
+	myWindow.Resize(fyne.NewSize(1225, 460))
 	myWindow.ShowAndRun()
-
 }

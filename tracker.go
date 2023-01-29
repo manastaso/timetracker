@@ -785,7 +785,7 @@ func getProjectAndAccountForIssue(issue string) IssueWithProjectAndActivity {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer ")
+	req.Header.Set("Authorization", "Bearer xxx")
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -826,7 +826,7 @@ func getAccountsForProject(projectID string) []string {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer ")
+	req.Header.Set("Authorization", "Bearer xxx")
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -878,7 +878,7 @@ func searchJIRAIsssue(q string) []string {
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer ")
+	req.Header.Set("Authorization", "Bearer xxx")
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())
@@ -927,6 +927,10 @@ func searchJIRAIsssue(q string) []string {
 
 func postWorkLog(task string, taskName string, account string, accountName string, comment string, duration time.Duration) {
 	saveWorkLogToHistory(task, taskName, account, accountName, comment)
+	postWorkLogToJIRA(task, taskName, account, accountName, comment, duration)
+}
+
+func postWorkLogToJIRA(task string, taskName string, account string, accountName string, comment string, duration time.Duration) {
 	myLocation := getPublicIP()
 
 	var originTaskID string
@@ -976,7 +980,7 @@ func postWorkLog(task string, taskName string, account string, accountName strin
 	}
 
 	req, err := http.NewRequest("POST", "https://jira.surecomp.com/rest/tempo-timesheets/4/worklogs", buf)
-	req.Header.Set("Authorization", "Bearer ")
+	req.Header.Set("Authorization", "Bearer xxx")
 	req.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		myLogger.Printf("\nGot error %s", err.Error())

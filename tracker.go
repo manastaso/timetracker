@@ -927,7 +927,7 @@ func searchJIRAIsssue(q string) []string {
 
 func postWorkLog(task string, taskName string, account string, accountName string, comment string, duration time.Duration) {
 	saveWorkLogToHistory(task, taskName, account, accountName, comment)
-	postWorkLogToJIRA(task, taskName, account, accountName, comment, duration)
+	//postWorkLogToJIRA(task, taskName, account, accountName, comment, duration)
 }
 
 func postWorkLogToJIRA(task string, taskName string, account string, accountName string, comment string, duration time.Duration) {
@@ -1356,6 +1356,9 @@ func main() {
 		projectFormItem := widget.NewFormItem("Project", projectEntry)
 		jiraCheck := widget.NewCheckWithData("", searchJIRAForTasks)
 		formItemJIRACheck := widget.NewFormItem("Search JIRA for tasks?", jiraCheck)
+		jiraCheck.Disable()
+		accountEntry.Disable()
+		projectEntry.Disable()
 		radio := widget.NewRadioGroup([]string{"LRU", "LFU", "A to Z", "Z to A"}, func(value string) {
 			recentEntry.Options = getStringFromHistory(worklogHistory, value)
 			recentEntry.Refresh()
